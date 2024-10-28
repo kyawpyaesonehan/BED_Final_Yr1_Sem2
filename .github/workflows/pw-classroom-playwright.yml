@@ -1,0 +1,126 @@
+# This workflow will do a clean installation of node dependencies, cache/restore them, build the source code and run tests across different versions of node
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-nodejs
+
+name: PW's Classroom with Playwright Workflow
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  checks: write
+  actions: read
+  contents: read
+  issues: write
+
+env:
+  DB_PASSWORD: '1234'
+  DB_DATABASE: 'pokemon'
+  JWT_SECRET_KEY: 'your-secret-key'
+  JWT_EXPIRES_IN: '15m'
+  JWT_ALGORITHM: 'HS256'
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: ${{ env.DB_PASSWORD }}
+          MYSQL_DATABASE: ${{ env.DB_DATABASE }}
+        ports:
+          - '3306:3306'
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+
+    strategy:
+      matrix:
+        node-version: [18.x]
+        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
+
+    steps:
+    - name: GitHub Action Checkout
+      uses: actions/checkout@v3
+
+    - name: Create Database
+      run:
+        mysql -h 127.0.0.1 -uroot -p${{ env.DB_PASSWORD }} -e 'CREATE DATABASE IF NOT EXISTS ${{ env.DB_DATABASE }};'
+    
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v3
+      with:
+        node-version: ${{ matrix.node-version }}
+        cache: 'npm'
+        
+    - name: Install Modules
+      run: npm ci
+
+    - name: Install Playwright Dependencies
+      run: npx playwright install
+
+    - name: Create env file
+      run: |
+        touch -c .env
+        echo DB_HOST=localhost >> .env
+        echo DB_USER=root >> .env
+        echo DB_PASSWORD=${{ env.DB_PASSWORD }} >> .env
+        echo DB_DATABASE=${{ env.DB_DATABASE }} >> .env
+        echo JWT_SECRET_KEY=${{ env.JWT_SECRET_KEY }} >> .env
+        echo JWT_EXPIRES_IN==${{ env.JWT_EXPIRES_IN }} >> .env
+        echo JWT_ALGORITHM==${{ env.JWT_ALGORITHM }} >> .env
+
+    - name: Initialise Database Tables
+      run: npm run init_tables
+      
+    # - name: Run GitHub Classroom Autograding
+    #   uses: education/autograding@v1
+
+    - name: Run Playwright Test
+      run: npm run test:server || true
+    
+    - name: Extract Test Results
+      run: |
+        touch -c results.
+        totalPass=$(cat test_results.json | jq -r '.numPassedTests')
+        totalFailed=$(cat test_results.json | jq -r '.numFailedTests')
+        totalTests=$(cat test_results.json | jq -r '.numTotalTests')
+        
+        echo "Total Pass: $totalPass"
+        echo "Total Failed: $totalFailed"
+        echo "Total Tests: $totalTests"
+
+        percentage=$(( totalPass * 100 / totalTests ))
+        printf -v percentage_int '%d' "$percentage"
+        echo "Pass percentage: $percentage_int%"
+
+        percentage=$(awk "BEGIN { printf \"%.2f\", $totalPass * 100 / $totalTests }")
+
+        # Create a JSON object
+        echo "{\"totalPass\": $totalPass, \"totalFailed\": $totalFailed, \"totalTests\": $totalTests, \"passPercentage\": $percentage}" >> result.json
+    
+    - name: Create new issue with result.json
+      run: |
+        ISSUE_TITLE="Autograding Result"
+        ISSUE_BODY=$(echo "### Test Results\n")
+        ISSUE_BODY+=$(echo "| Metric | Value |\n")
+        ISSUE_BODY+=$(echo "| ------ | ----- |\n")
+
+        # Read and process result.json
+        totalPass=$(jq -r '.totalPass' result.json)
+        totalFailed=$(jq -r '.totalFailed' result.json)
+        totalTests=$(jq -r '.totalTests' result.json)
+        passPercentage=$(jq -r '.passPercentage' result.json)
+
+        ISSUE_BODY+=$(echo "| Total Pass | $totalPass |\n")
+        ISSUE_BODY+=$(echo "| Total Failed | $totalFailed |\n")
+        ISSUE_BODY+=$(echo "| Total Tests | $totalTests |\n")
+        ISSUE_BODY+=$(echo "| Pass Percentage | $passPercentage% |\n")
+
+        curl -X POST \
+          -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          -d "{\"title\": \"$ISSUE_TITLE\", \"body\": \"$ISSUE_BODY\"}" \
+          "https://api.github.com/repos/${{ github.repository }}/issues"
